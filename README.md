@@ -1,0 +1,1 @@
+Thuyền trưởng AI

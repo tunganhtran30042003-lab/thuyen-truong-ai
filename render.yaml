@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: thuyen-truong-ai
+    runtime: docker
+    plan: free
+    region: singapore
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: CAPTAIN_KEYS
+        sync: false
+      - key: LOG_LEVEL
+        value: INFO
+      - key: REQUEST_TIMEOUT
+        value: "120"
