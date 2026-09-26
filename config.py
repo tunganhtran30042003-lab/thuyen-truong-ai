@@ -3,11 +3,19 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ─── KEY THUYỀN TRƯỞNG (user dùng để gọi thuyền trưởng) ───
 CAPTAIN_KEYS = [k.strip() for k in os.getenv("CAPTAIN_KEYS", "").split(",") if k.strip()]
 
+# ─── KEY RIÊNG THUYỀN TRƯỞNG (tay trái + tay phải) ───
+CAPTAIN_GROQ_KEY = os.getenv("CAPTAIN_GROQ_KEY", "")
+CAPTAIN_GEMINI_KEY = os.getenv("CAPTAIN_GEMINI_KEY", "")
+CAPTAIN_OPENROUTER_KEY = os.getenv("CAPTAIN_OPENROUTER_KEY", "")
+
+# ─── THAM SỐ CHUNG ───
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "120"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
+# ─── BẢNG BASE URL PROVIDER (dùng cho model user) ───
 USER_PROVIDER_BASE_URLS = {
     "openai":     "https://api.openai.com/v1",
     "groq":       "https://api.groq.com/openai/v1",
