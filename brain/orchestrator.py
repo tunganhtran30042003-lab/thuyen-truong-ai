@@ -24,11 +24,15 @@ PROVIDER_MODEL_PRIORITY = {
         "gemini-flash-latest",
         "gemini-2.0-flash",
     ],
+    # OpenRouter FREE — chỉ dùng model có hậu tố :free (không cần credits)
     "openrouter": [
-        "openai/gpt-4o-mini",
-        "anthropic/claude-3.5-haiku",
-        "google/gemini-flash-1.5",
-        "meta-llama/llama-3.3-70b-instruct",
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "google/gemini-2.0-flash-exp:free",
+        "qwen/qwen-2.5-72b-instruct:free",
+        "deepseek/deepseek-r1:free",
+        "meta-llama/llama-3.1-8b-instruct:free",
+        "mistralai/mistral-7b-instruct:free",
+        "microsoft/phi-3-medium-128k-instruct:free",
     ],
     "openai": ["gpt-4o-mini", "gpt-4o"],
     "anthropic": ["claude-3-5-haiku", "claude-3-5-sonnet"],
@@ -76,8 +80,13 @@ def _build_model_try_list(provider: str, user_model: str) -> List[str]:
     """
     try_list: List[str] = []
 
+    # Bỏ model user nếu là OpenRouter không có :free
     if user_model:
-        try_list.append(user_model)
+        if provider == "openrouter" and ":free" not in user_model:
+            # Bỏ qua — dùng model :free từ priority
+            pass
+        else:
+            try_list.append(user_model)
 
     priority = PROVIDER_MODEL_PRIORITY.get(provider, [])
     for m in priority:
