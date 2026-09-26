@@ -35,9 +35,9 @@ app = FastAPI(title="Thuyền trưởng AI", version="1.0.0", lifespan=lifespan)
 class ChatRequest(BaseModel):
     model: str = "captain-v1"
     messages: List[Dict[str, Any]]
-    user_api_key: str
-    user_provider: Optional[str] = "openai"
-    user_model: Optional[str] = None
+    user_api_key: Optional[str] = None
+    user_provider: Optional[str] = "groq"
+    user_model: Optional[str] = "openai/gpt-oss-120b"
     user_base_url: Optional[str] = None
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
@@ -78,7 +78,6 @@ async def health():
 
 @app.get("/v1/stats")
 async def stats(authorization: Optional[str] = Header(None)):
-    """Thống kê memory: số nguyên lý, số case."""
     _check_auth(authorization)
     try:
         n_principles = await count_principles()
@@ -96,7 +95,6 @@ async def stats(authorization: Optional[str] = Header(None)):
 
 @app.get("/v1/models/active")
 async def models_active(authorization: Optional[str] = Header(None)):
-    """Lấy danh sách model còn hoạt động từ mỗi provider."""
     _check_auth(authorization)
     data = await list_active_models()
     return data

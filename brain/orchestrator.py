@@ -11,20 +11,14 @@ logger = logging.getLogger("captain.orchestrator")
 
 
 async def orchestrate(captain_key: str, request: Dict[str, Any]) -> Dict[str, Any]:
-    user_api_key = request.get("user_api_key")
-    if not user_api_key:
-        raise ValueError("Thiếu user_api_key")
-
     messages = request.get("messages")
     if not messages or not isinstance(messages, list):
         raise ValueError("Thiếu messages (phải là list)")
 
-    user_provider = request.get("user_provider") or "openai"
-    user_model = request.get("user_model")
+    user_api_key = request.get("user_api_key") or ""
+    user_provider = request.get("user_provider") or "groq"
+    user_model = request.get("user_model") or "openai/gpt-oss-120b"
     user_base_url = request.get("user_base_url") or ""
-
-    if not user_model:
-        raise ValueError("Thiếu user_model")
 
     history = []
     try:
@@ -42,7 +36,7 @@ async def orchestrate(captain_key: str, request: Dict[str, Any]) -> Dict[str, An
                 last_user = m.get("content", "")
                 await append_message(captain_key, "user", last_user)
     except Exception as e:
-        logger.warning("Không ghi được user vào short_term: %s", e)
+        logger.warning("Không ghi được user: %s", e)
 
     try:
         principles = await find_principles(last_user, top_k=5)
@@ -50,7 +44,10 @@ async def orchestrate(captain_key: str, request: Dict[str, Any]) -> Dict[str, An
             hint = "\n\nNguyên lý liên quan:\n" + "\n".join(
                 f"- {p['title']}: {p.get('method', '')}" for p in principles
             )
-            merged.insert(0, {"role": "system", "content": "Bạn được Thuyền trưởng AI điều phối." + hint})
+            merged.insert(0, {
+                "role": "system",
+                "content": "Bạn được Thuyền trưởng AI điều phối." + hint,
+            })
     except Exception as e:
         logger.warning("Không tra được nguyên lý: %s", e)
 
@@ -61,36 +58,43 @@ async def orchestrate(captain_key: str, request: Dict[str, Any]) -> Dict[str, An
 
     response = None
     content = ""
-    source = "user_model"
-    try:
-        response = await call_user_model(
-            api_key=user_api_key,
-            model=user_model,
-            messages=merged,
-            provider=user_provider,
-            base_url=user_base_url,
-            **kwargs,
-        )
-        choices = response.get("choices") or []
-        if choices:
-            content = choices[0].get("message", {}).get("content", "")
-    except Exception as e:
-        logger.warning("Model user lỗi: %s — chuyển sang tay trái", e)
+    source = "captain_model"
+
+    if user_api_key:
+        source = "user_model"
+        try:
+            response = await call_user_model(
+                api_key=user_api_key,
+                model=user_model,
+                messages=merged,
+                provider=user_provider,
+                base_url=user_base_url,
+                **kwargs,
+            )
+            choices = response.get("choices") or []
+            if choices:
+                content = choices[0].get("message", {}).get("content", "")
+        except Exception as e:
+            logger.warning("Model user lỗi: %s — chuyển sang key thuyền trưởng", e)
 
     if not content:
-        logger.info("Gọi tay trái xử lý")
-        source = "left_hand"
+        logger.info("Dùng key thuyền trưởng xử lý")
+        source = "captain_model"
         try:
             content = await left_hand_solve(merged)
         except Exception as e:
-            logger.error("Tay trái cũng lỗi: %s", e)
-            raise RuntimeError(f"Cả model user và tay trái đều lỗi: {e}")
+            logger.error("Key thuyền trưởng cũng lỗi: %s", e)
+            raise RuntimeError(f"Không có model nào xử lý được: {e}")
 
         response = {
-            "id": "captain-left",
+            "id": "captain-default",
             "object": "chat.completion",
             "model": "captain-v1",
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+            }],
         }
 
     try:
