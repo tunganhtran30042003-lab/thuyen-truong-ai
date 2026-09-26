@@ -13,13 +13,13 @@ logger = logging.getLogger("captain.key_pool")
 
 LEFT_HAND_CHAIN: List[Dict[str, Any]] = [
     {"provider": "groq",       "model": "openai/gpt-oss-120b"},
-    {"provider": "gemini",     "model": "gemini-2.0-flash"},
+    {"provider": "gemini",     "model": "gemini-3.8-flash"},
     {"provider": "groq",       "model": "openai/gpt-oss-20b"},
     {"provider": "openrouter", "model": "nvidia/nemotron-3-ultra-550b-a55b:free"},
 ]
 
 RIGHT_HAND_CHAIN: List[Dict[str, Any]] = [
-    {"provider": "gemini",     "model": "gemini-2.0-flash"},
+    {"provider": "gemini",     "model": "gemini-3.8-flash"},
     {"provider": "groq",       "model": "openai/gpt-oss-120b"},
     {"provider": "openrouter", "model": "nvidia/nemotron-3-ultra-550b-a55b:free"},
 ]

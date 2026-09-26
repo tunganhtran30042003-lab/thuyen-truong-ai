@@ -20,6 +20,15 @@ async def orchestrate(captain_key: str, request: Dict[str, Any]) -> Dict[str, An
     user_model = request.get("user_model") or "openai/gpt-oss-120b"
     user_base_url = request.get("user_base_url") or ""
 
+    # ⚠️ LOG DEBUG — xem JS gửi gì xuống
+    logger.info(
+        "NHẬN REQUEST | user_api_key=%s | user_provider=%s | user_model=%s | user_base_url=%s",
+        ("CÓ (" + user_api_key[:10] + "...)") if user_api_key else "KHÔNG",
+        user_provider,
+        user_model,
+        user_base_url or "(trống)"
+    )
+
     history = []
     try:
         history = await get_recent(captain_key, limit=20)
@@ -63,6 +72,7 @@ async def orchestrate(captain_key: str, request: Dict[str, Any]) -> Dict[str, An
     # ===== NỘI LỰC: có key user → dùng model user =====
     if user_api_key:
         source = "user_model"
+        logger.info("→ Thử gọi model user: %s | %s", user_provider, user_model)
         try:
             response = await call_user_model(
                 api_key=user_api_key,
@@ -75,8 +85,11 @@ async def orchestrate(captain_key: str, request: Dict[str, Any]) -> Dict[str, An
             choices = response.get("choices") or []
             if choices:
                 content = choices[0].get("message", {}).get("content", "")
+            logger.info("→ Model user OK, content dài %d ký tự", len(content))
         except Exception as e:
-            logger.warning("Model user lỗi: %s — chuyển sang tay trái", e)
+            logger.warning("→ Model user LỖI: %s — chuyển sang tay trái", e)
+    else:
+        logger.info("→ KHÔNG có user_api_key → dùng tay trái luôn")
 
     # ===== VƯỢT SỨC: không có key user, hoặc key user lỗi → tay trái =====
     if not content:
