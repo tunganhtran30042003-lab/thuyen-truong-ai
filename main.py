@@ -1,4 +1,5 @@
 import logging
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Header, HTTPException
@@ -9,6 +10,7 @@ from config import LOG_LEVEL
 from auth.captain_keys import is_valid_captain_key
 from auth.rate_limit import is_rate_limited
 from brain.orchestrator import orchestrate
+from memory.db import init_pool, close_pool
 
 logging.basicConfig(
     level=LOG_LEVEL,
@@ -16,7 +18,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("captain")
 
-app = FastAPI(title="Thuyền trưởng AI", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_pool()
+    yield
+    await close_pool()
+
+
+app = FastAPI(title="Thuyền trưởng AI", version="1.0.0", lifespan=lifespan)
 
 
 class ChatRequest(BaseModel):
@@ -69,7 +79,7 @@ async def chat_completions(
         raise HTTPException(status_code=429, detail="Vượt giới hạn tần suất")
 
     try:
-        result = await orchestrate(req.model_dump())
+        result = await orchestrate(captain_key, req.model_dump())
         return JSONResponse(content=result)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
