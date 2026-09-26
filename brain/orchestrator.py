@@ -10,6 +10,23 @@ from hands.right import right_hand_teach
 logger = logging.getLogger("captain.orchestrator")
 
 
+# System prompt ràng buộc độ dài + trọng tâm
+SYSTEM_RULES = """Bạn là trợ lý AI thông minh. QUY TẮC BẮT BUỘC — PHẢI TUÂN THỦ:
+
+1. TRẢ LỜI NGẮN GỌN, ĐÚNG TRỌNG TÂM, KHÔNG LAN MAN.
+2. Câu hỏi ngắn (chào hỏi, câu đơn giản) → trả lời 1-2 câu ngắn.
+3. Câu hỏi cụ thể → trả lời thẳng vào vấn đề, KHÔNG giới thiệu dài dòng.
+4. KHÔNG tự đề xuất chủ đề khác. KHÔNG hỏi "bạn muốn làm gì tiếp".
+5. KHÔNG chào hỏi kiểu "Xin chào! Rất vui được hỗ trợ bạn..." khi user chỉ nói "Hi".
+6. KHÔNG dùng tiêu đề markdown (###, ##) trừ khi user yêu cầu rõ.
+7. KHÔNG dùng emoji trừ khi user yêu cầu.
+8. KHÔNG lặp lại câu hỏi của user.
+9. KHÔNG giải thích dài dòng nếu user không hỏi "tại sao".
+10. Nếu không biết → nói "Tôi không biết" — KHÔNG bịa.
+
+Mục tiêu: câu trả lời CÀNG NGẮN CÀNG TỐT, miễn đủ ý."""
+
+
 # Model ưu tiên cho từng provider
 PROVIDER_MODEL_PRIORITY = {
     "groq": [
@@ -24,7 +41,6 @@ PROVIDER_MODEL_PRIORITY = {
         "gemini-flash-latest",
         "gemini-2.0-flash",
     ],
-    # OpenRouter FREE — chỉ dùng model có hậu tố :free (không cần credits)
     "openrouter": [
         "meta-llama/llama-3.3-70b-instruct:free",
         "google/gemini-2.0-flash-exp:free",
@@ -32,7 +48,6 @@ PROVIDER_MODEL_PRIORITY = {
         "deepseek/deepseek-r1:free",
         "meta-llama/llama-3.1-8b-instruct:free",
         "mistralai/mistral-7b-instruct:free",
-        "microsoft/phi-3-medium-128k-instruct:free",
     ],
     "openai": ["gpt-4o-mini", "gpt-4o"],
     "anthropic": ["claude-3-5-haiku", "claude-3-5-sonnet"],
@@ -43,12 +58,6 @@ PROVIDER_ORDER = ["groq", "gemini", "openrouter", "openai", "anthropic", "xai"]
 
 
 def _build_user_key_chain(request: Dict[str, Any]) -> List[Dict[str, str]]:
-    """
-    Trả về danh sách [{provider, key, model}, ...] theo thứ tự ưu tiên để thử.
-    Hỗ trợ cả 2 cách gửi:
-      1. user_keys: [{provider, key, model}, ...] (mới — gửi nhiều key)
-      2. user_api_key + user_provider + user_model (cũ — gửi 1 key)
-    """
     chain: List[Dict[str, str]] = []
 
     user_keys = request.get("user_keys")
@@ -62,7 +71,6 @@ def _build_user_key_chain(request: Dict[str, Any]) -> List[Dict[str, str]]:
             if provider and key:
                 chain.append({"provider": provider, "key": key, "model": model or ""})
 
-    # Fallback: cách cũ 1 key
     if not chain:
         old_key = request.get("user_api_key")
         if old_key:
@@ -74,16 +82,10 @@ def _build_user_key_chain(request: Dict[str, Any]) -> List[Dict[str, str]]:
 
 
 def _build_model_try_list(provider: str, user_model: str) -> List[str]:
-    """
-    Tạo danh sách model để thử cho 1 provider.
-    Ưu tiên model user gửi, sau đó các model trong priority.
-    """
     try_list: List[str] = []
 
-    # Bỏ model user nếu là OpenRouter không có :free
     if user_model:
         if provider == "openrouter" and ":free" not in user_model:
-            # Bỏ qua — dùng model :free từ priority
             pass
         else:
             try_list.append(user_model)
@@ -131,15 +133,19 @@ async def orchestrate(captain_key: str, request: Dict[str, Any]) -> Dict[str, An
     except Exception as e:
         logger.warning("Không ghi được user: %s", e)
 
+    # ===== CHÈN SYSTEM RULES (ràng buộc độ dài) =====
+    merged.insert(0, {"role": "system", "content": SYSTEM_RULES})
+
+    # ===== CHÈN NGUYÊN LÝ LIÊN QUAN (nếu có) =====
     try:
         principles = await find_principles(last_user, top_k=5)
         if principles:
-            hint = "\n\nNguyên lý liên quan:\n" + "\n".join(
+            hint = "Nguyên lý liên quan:\n" + "\n".join(
                 f"- {p['title']}: {p.get('method', '')}" for p in principles
             )
-            merged.insert(0, {
+            merged.insert(1, {
                 "role": "system",
-                "content": "Bạn được Thuyền trưởng AI điều phối." + hint,
+                "content": "Bạn được Thuyền trưởng AI điều phối. " + hint,
             })
     except Exception as e:
         logger.warning("Không tra được nguyên lý: %s", e)
@@ -148,6 +154,14 @@ async def orchestrate(captain_key: str, request: Dict[str, Any]) -> Dict[str, An
     for key in ("temperature", "max_tokens", "top_p", "stop"):
         if request.get(key) is not None:
             kwargs[key] = request[key]
+
+    # Giới hạn max_tokens mặc định cho câu trả lời ngắn
+    if "max_tokens" not in kwargs:
+        kwargs["max_tokens"] = 1024
+
+    # Giảm temperature để trả lời tập trung hơn
+    if "temperature" not in kwargs:
+        kwargs["temperature"] = 0.6
 
     response = None
     content = ""
