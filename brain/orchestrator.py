@@ -60,6 +60,7 @@ async def orchestrate(captain_key: str, request: Dict[str, Any]) -> Dict[str, An
     content = ""
     source = "left_hand"
 
+    # ===== NỘI LỰC: có key user → dùng model user =====
     if user_api_key:
         source = "user_model"
         try:
@@ -77,6 +78,7 @@ async def orchestrate(captain_key: str, request: Dict[str, Any]) -> Dict[str, An
         except Exception as e:
             logger.warning("Model user lỗi: %s — chuyển sang tay trái", e)
 
+    # ===== VƯỢT SỨC: không có key user, hoặc key user lỗi → tay trái =====
     if not content:
         logger.info("Gọi tay trái xử lý (vượt sức)")
         source = "left_hand"
@@ -103,6 +105,7 @@ async def orchestrate(captain_key: str, request: Dict[str, Any]) -> Dict[str, An
     except Exception as e:
         logger.warning("Không ghi được assistant: %s", e)
 
+    # ===== TAY PHẢI: luôn quan sát + dạy nguyên lý =====
     try:
         principle = await right_hand_teach(last_user, content, source=source)
         if principle and principle.get("title"):
