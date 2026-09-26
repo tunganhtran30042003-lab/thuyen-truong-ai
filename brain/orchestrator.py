@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from providers.user_model import call_user_model
 from memory.short_term import append_message, get_recent
@@ -10,23 +10,98 @@ from hands.right import right_hand_teach
 logger = logging.getLogger("captain.orchestrator")
 
 
+# Model ưu tiên cho từng provider
+PROVIDER_MODEL_PRIORITY = {
+    "groq": [
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+        "llama-3.3-70b-versatile",
+        "llama-3.1-70b-versatile",
+        "qwen/qwen3-32b",
+    ],
+    "gemini": [
+        "gemini-2.5-flash",
+        "gemini-flash-latest",
+        "gemini-2.0-flash",
+    ],
+    "openrouter": [
+        "openai/gpt-4o-mini",
+        "anthropic/claude-3.5-haiku",
+        "google/gemini-flash-1.5",
+        "meta-llama/llama-3.3-70b-instruct",
+    ],
+    "openai": ["gpt-4o-mini", "gpt-4o"],
+    "anthropic": ["claude-3-5-haiku", "claude-3-5-sonnet"],
+    "xai": ["grok-2", "grok-beta"],
+}
+
+PROVIDER_ORDER = ["groq", "gemini", "openrouter", "openai", "anthropic", "xai"]
+
+
+def _build_user_key_chain(request: Dict[str, Any]) -> List[Dict[str, str]]:
+    """
+    Trả về danh sách [{provider, key, model}, ...] theo thứ tự ưu tiên để thử.
+    Hỗ trợ cả 2 cách gửi:
+      1. user_keys: [{provider, key, model}, ...] (mới — gửi nhiều key)
+      2. user_api_key + user_provider + user_model (cũ — gửi 1 key)
+    """
+    chain: List[Dict[str, str]] = []
+
+    user_keys = request.get("user_keys")
+    if isinstance(user_keys, list) and user_keys:
+        for item in user_keys:
+            if not isinstance(item, dict):
+                continue
+            provider = item.get("provider")
+            key = item.get("key")
+            model = item.get("model")
+            if provider and key:
+                chain.append({"provider": provider, "key": key, "model": model or ""})
+
+    # Fallback: cách cũ 1 key
+    if not chain:
+        old_key = request.get("user_api_key")
+        if old_key:
+            provider = request.get("user_provider") or "groq"
+            model = request.get("user_model") or ""
+            chain.append({"provider": provider, "key": old_key, "model": model})
+
+    return chain
+
+
+def _build_model_try_list(provider: str, user_model: str) -> List[str]:
+    """
+    Tạo danh sách model để thử cho 1 provider.
+    Ưu tiên model user gửi, sau đó các model trong priority.
+    """
+    try_list: List[str] = []
+
+    if user_model:
+        try_list.append(user_model)
+
+    priority = PROVIDER_MODEL_PRIORITY.get(provider, [])
+    for m in priority:
+        if m not in try_list:
+            try_list.append(m)
+
+    if not try_list:
+        try_list.append(user_model or "")
+
+    return try_list
+
+
 async def orchestrate(captain_key: str, request: Dict[str, Any]) -> Dict[str, Any]:
     messages = request.get("messages")
     if not messages or not isinstance(messages, list):
         raise ValueError("Thiếu messages (phải là list)")
 
-    user_api_key = request.get("user_api_key") or ""
-    user_provider = request.get("user_provider") or "groq"
-    user_model = request.get("user_model") or "openai/gpt-oss-120b"
     user_base_url = request.get("user_base_url") or ""
+    user_key_chain = _build_user_key_chain(request)
 
-    # ⚠️ LOG DEBUG — xem JS gửi gì xuống
     logger.info(
-        "NHẬN REQUEST | user_api_key=%s | user_provider=%s | user_model=%s | user_base_url=%s",
-        ("CÓ (" + user_api_key[:10] + "...)") if user_api_key else "KHÔNG",
-        user_provider,
-        user_model,
-        user_base_url or "(trống)"
+        "NHẬN REQUEST | user_key_chain=%d provider(s) | providers=%s",
+        len(user_key_chain),
+        [k["provider"] for k in user_key_chain] or "(không có)",
     )
 
     history = []
@@ -69,29 +144,51 @@ async def orchestrate(captain_key: str, request: Dict[str, Any]) -> Dict[str, An
     content = ""
     source = "left_hand"
 
-    # ===== NỘI LỰC: có key user → dùng model user =====
-    if user_api_key:
-        source = "user_model"
-        logger.info("→ Thử gọi model user: %s | %s", user_provider, user_model)
-        try:
-            response = await call_user_model(
-                api_key=user_api_key,
-                model=user_model,
-                messages=merged,
-                provider=user_provider,
-                base_url=user_base_url,
-                **kwargs,
-            )
-            choices = response.get("choices") or []
-            if choices:
-                content = choices[0].get("message", {}).get("content", "")
-            logger.info("→ Model user OK, content dài %d ký tự", len(content))
-        except Exception as e:
-            logger.warning("→ Model user LỖI: %s — chuyển sang tay trái", e)
-    else:
-        logger.info("→ KHÔNG có user_api_key → dùng tay trái luôn")
+    # ===== THỬ TỪNG KEY USER THEO THỨ TỰ =====
+    for entry in user_key_chain:
+        provider = entry["provider"]
+        api_key = entry["key"]
+        user_model = entry["model"]
 
-    # ===== VƯỢT SỨC: không có key user, hoặc key user lỗi → tay trái =====
+        model_try_list = _build_model_try_list(provider, user_model)
+        logger.info(
+            "→ Thử provider=%s | models=%s",
+            provider,
+            model_try_list,
+        )
+
+        for model_name in model_try_list:
+            if not model_name:
+                continue
+            try:
+                response = await call_user_model(
+                    api_key=api_key,
+                    model=model_name,
+                    messages=merged,
+                    provider=provider,
+                    base_url=user_base_url,
+                    **kwargs,
+                )
+                choices = response.get("choices") or []
+                if choices:
+                    content = choices[0].get("message", {}).get("content", "")
+                if content:
+                    source = "user_model"
+                    logger.info(
+                        "→ Model user OK: %s | %s | dài %d ký tự",
+                        provider, model_name, len(content),
+                    )
+                    break
+            except Exception as e:
+                logger.warning(
+                    "→ Model user lỗi: %s | %s | %s",
+                    provider, model_name, e,
+                )
+
+        if content:
+            break
+
+    # ===== VƯỢT SỨC: tất cả key user đều lỗi → tay trái =====
     if not content:
         logger.info("Gọi tay trái xử lý (vượt sức)")
         source = "left_hand"
@@ -118,7 +215,6 @@ async def orchestrate(captain_key: str, request: Dict[str, Any]) -> Dict[str, An
     except Exception as e:
         logger.warning("Không ghi được assistant: %s", e)
 
-    # ===== TAY PHẢI: luôn quan sát + dạy nguyên lý =====
     try:
         principle = await right_hand_teach(last_user, content, source=source)
         if principle and principle.get("title"):

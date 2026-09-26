@@ -32,13 +32,20 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Thuyền trưởng AI", version="1.0.0", lifespan=lifespan)
 
 
+class UserModelKey(BaseModel):
+    provider: str
+    key: str
+    model: Optional[str] = None
+
+
 class ChatRequest(BaseModel):
     model: str = "captain-v1"
     messages: List[Dict[str, Any]]
     user_api_key: Optional[str] = None
-    user_provider: Optional[str] = "groq"
-    user_model: Optional[str] = "openai/gpt-oss-120b"
+    user_provider: Optional[str] = None
+    user_model: Optional[str] = None
     user_base_url: Optional[str] = None
+    user_keys: Optional[List[UserModelKey]] = None
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     top_p: Optional[float] = None
