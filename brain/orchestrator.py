@@ -58,7 +58,7 @@ async def orchestrate(captain_key: str, request: Dict[str, Any]) -> Dict[str, An
 
     response = None
     content = ""
-    source = "captain_model"
+    source = "left_hand"
 
     if user_api_key:
         source = "user_model"
@@ -75,19 +75,19 @@ async def orchestrate(captain_key: str, request: Dict[str, Any]) -> Dict[str, An
             if choices:
                 content = choices[0].get("message", {}).get("content", "")
         except Exception as e:
-            logger.warning("Model user lỗi: %s — chuyển sang key thuyền trưởng", e)
+            logger.warning("Model user lỗi: %s — chuyển sang tay trái", e)
 
     if not content:
-        logger.info("Dùng key thuyền trưởng xử lý")
-        source = "captain_model"
+        logger.info("Gọi tay trái xử lý (vượt sức)")
+        source = "left_hand"
         try:
             content = await left_hand_solve(merged)
         except Exception as e:
-            logger.error("Key thuyền trưởng cũng lỗi: %s", e)
+            logger.error("Tay trái cũng lỗi: %s", e)
             raise RuntimeError(f"Không có model nào xử lý được: {e}")
 
         response = {
-            "id": "captain-default",
+            "id": "captain-left-hand",
             "object": "chat.completion",
             "model": "captain-v1",
             "choices": [{
@@ -120,5 +120,6 @@ async def orchestrate(captain_key: str, request: Dict[str, Any]) -> Dict[str, An
 
     if isinstance(response, dict):
         response["model"] = "captain-v1"
+        response["captain_source"] = source
 
     return response
