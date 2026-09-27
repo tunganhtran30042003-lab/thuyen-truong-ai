@@ -13,11 +13,13 @@ from config import REQUEST_TIMEOUT
 logger = logging.getLogger("captain.brain.model_registry")
 
 
-# Model đã bị khai tử — loại vĩnh viễn
+# ⚠️ Model đã bị khai tử — loại vĩnh viễn
 DEPRECATED_MODELS: Dict[str, List[str]] = {
     "groq": [
+        # Khai tử 2025-2026
         "llama-3.1-8b-instant",
         "llama-3.3-70b-versatile",
+        "llama-3.1-70b-versatile",
         "qwen/qwen3-32b",
         "meta-llama/llama-4-scout-17b",
         "mixtral-8x7b-32768",
@@ -34,17 +36,26 @@ DEPRECATED_MODELS: Dict[str, List[str]] = {
     "nvidia": [
         "kimi-k2",
         "glm-5.1",
+        "qwen/qwen3-coder-480b-a35b-instruct",
+        "moonshotai/kimi-k2.5",
+        "deepseek-ai/deepseek-v3.2",
     ],
     "openrouter": [
+        # Khai tử 2025-2026
         "qwen/qwen3-coder:free",
         "meta-llama/llama-3.1-8b-instruct:free",
         "meta-llama/llama-3.3-70b-instruct:free",
+        "meta-llama/llama-3.3-70b-instruct",
         "deepseek/deepseek-r1:free",
+        "anthropic/claude-3.5-haiku",
+        "google/gemini-flash-1.5",
+        "openai/gpt-4o-mini",
     ],
     "gemini": [
         "gemini-2.0-flash",
         "gemini-1.5-pro",
         "gemini-1.5-flash",
+        "gemini-2.5-pro",  # Đã paid-only từ 1/4/2026, không còn dùng free
     ],
     "openai": [
         "gpt-3.5-turbo",
@@ -103,7 +114,6 @@ async def fetch_models_from_provider(
 
     headers = {"Authorization": f"Bearer {api_key}"}
 
-    # Anthropic dùng header khác
     if provider == "anthropic":
         headers = {
             "x-api-key": api_key,
@@ -128,7 +138,6 @@ async def fetch_models_from_provider(
                 if mid:
                     raw_ids.append(str(mid))
 
-        # Lọc
         filtered: List[str] = []
         for m in raw_ids:
             if is_deprecated(provider, m):
@@ -151,7 +160,6 @@ async def fetch_all_providers(
     """
     Fetch models từ tất cả provider có key.
     provider_keys = {"groq": "gsk_...", "gemini": "AIza...", ...}
-    Trả về dict {provider: [model1, model2, ...]}
     """
     result: Dict[str, List[str]] = {}
 
@@ -159,7 +167,6 @@ async def fetch_all_providers(
         if not api_key:
             continue
 
-        # Gemini dùng endpoint khác (không giống OpenAI)
         if provider == "gemini":
             models = await _fetch_gemini_models(api_key)
         else:
@@ -194,10 +201,8 @@ async def _fetch_gemini_models(api_key: str) -> List[str]:
             if not name:
                 continue
 
-            # Bỏ prefix "models/"
             model_id = name.replace("models/", "")
 
-            # Chỉ lấy model hỗ trợ generateContent
             methods = item.get("supportedGenerationMethods") or []
             if "generateContent" not in methods:
                 continue
@@ -224,7 +229,7 @@ def pick_default_model_for_provider(provider: str) -> str:
     defaults = {
         "groq":       "openai/gpt-oss-120b",
         "gemini":     "gemini-2.5-flash",
-        "openrouter": "meta-llama/llama-3.3-70b-instruct:free",
+        "openrouter": "poolside/laguna-s-2.1:free",
         "openai":     "gpt-4o-mini",
         "anthropic":  "claude-3-5-haiku",
         "xai":        "grok-2",
@@ -238,10 +243,7 @@ def filter_models_for_provider(
     provider: str,
     models: List[str],
 ) -> List[str]:
-    """
-    Lọc lại danh sách model đã có (không cần gọi API).
-    Dùng khi đọc từ cache/DB.
-    """
+    """Lọc lại danh sách model đã có (không cần gọi API)."""
     if not models:
         return []
 

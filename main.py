@@ -20,8 +20,8 @@ from brain.orchestrator import orchestrate
 from brain.model_updater import list_active_models
 from brain.model_registry import fetch_all_providers
 from brain.health_check import get_all_invalid, clear_cache
-from memory.db import init_pool, close_pool
-from memory.mid_term import count_principles
+from memory.db import init_pool, close_pool, ensure_pool
+from memory.mid_term import count_principles, save_principle
 from memory.long_term import count_cases
 from memory.model_registry_db import (
     ensure_table,
@@ -29,6 +29,7 @@ from memory.model_registry_db import (
     get_all_active,
     count_by_provider,
 )
+from hands.right import right_hand_teach
 
 logging.basicConfig(
     level=LOG_LEVEL,
@@ -41,6 +42,7 @@ AUTO_REFRESH_INTERVAL_SECONDS = 24 * 60 * 60
 
 _last_refresh_ts: float = 0.0
 _refresh_lock = asyncio.Lock()
+_queue_lock = asyncio.Lock()
 
 
 @asynccontextmanager
@@ -122,6 +124,85 @@ async def _do_refresh_models() -> Dict[str, Any]:
     }
 
 
+async def _process_learning_queue(batch_size: int = 10) -> Dict[str, Any]:
+    """
+    Quét bảng learning_queue → dạy lại nguyên lý cho từng item.
+    """
+    pool = await ensure_pool()
+    processed = 0
+    failed = 0
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            select id, user_message, assistant_output, source, retry_count
+            from learning_queue
+            where processed = false
+            order by id asc
+            limit $1
+            """,
+            batch_size,
+        )
+
+    for row in rows:
+        item_id = row["id"]
+        user_msg = row["user_message"] or ""
+        assistant_out = row["assistant_output"] or ""
+        source = row["source"] or "unknown"
+
+        try:
+            principle = await right_hand_teach(user_msg, assistant_out, source=source)
+            if principle and principle.get("title"):
+                await save_principle(
+                    group_id=int(principle.get("group_id", 0)),
+                    title=principle["title"],
+                    method=principle.get("method", ""),
+                    example=principle.get("example", ""),
+                    confidence=float(principle.get("confidence", 0.5)),
+                    source=source,
+                )
+
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "update learning_queue set processed = true where id = $1",
+                        item_id,
+                    )
+                processed += 1
+                logger.info("Queue #%d OK: %s", item_id, principle["title"])
+            else:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        update learning_queue
+                        set retry_count = retry_count + 1
+                        where id = $1
+                        """,
+                        item_id,
+                    )
+                failed += 1
+                logger.warning("Queue #%d không trích được nguyên lý", item_id)
+
+        except Exception as e:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    update learning_queue
+                    set retry_count = retry_count + 1
+                    where id = $1
+                    """,
+                    item_id,
+                )
+            failed += 1
+            logger.warning("Queue #%d lỗi: %s", item_id, str(e)[:200])
+
+    return {
+        "ok": True,
+        "processed": processed,
+        "failed": failed,
+        "total_fetched": len(rows),
+    }
+
+
 @app.get("/")
 async def root():
     return {
@@ -135,22 +216,17 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """
-    Endpoint health check.
-    Kiêm luôn auto-refresh model mỗi 24h.
-    """
+    """Health check + auto-refresh models mỗi 24h."""
     global _last_refresh_ts
 
     now = time.time()
     elapsed = now - _last_refresh_ts
 
     if elapsed >= AUTO_REFRESH_INTERVAL_SECONDS:
-        if _refresh_lock.locked():
-            logger.info("Refresh đang chạy, bỏ qua lần này")
-        else:
+        if not _refresh_lock.locked():
             async with _refresh_lock:
                 try:
-                    logger.info("Auto-refresh model (đã %ds từ lần cuối)", int(elapsed))
+                    logger.info("Auto-refresh model (đã %ds)", int(elapsed))
                     res = await _do_refresh_models()
                     if res.get("ok"):
                         _last_refresh_ts = time.time()
@@ -195,7 +271,6 @@ async def models_active(authorization: Optional[str] = Header(None)):
 
 @app.get("/v1/models/refresh")
 async def models_refresh(authorization: Optional[str] = Header(None)):
-    """Refresh models thủ công."""
     global _last_refresh_ts
     _check_auth(authorization)
 
@@ -237,6 +312,52 @@ async def models_clear_cache(authorization: Optional[str] = Header(None)):
     _check_auth(authorization)
     clear_cache()
     return {"ok": True}
+
+
+@app.get("/v1/learning/queue-status")
+async def learning_queue_status(authorization: Optional[str] = Header(None)):
+    """Xem trạng thái learning_queue."""
+    _check_auth(authorization)
+
+    pool = await ensure_pool()
+    async with pool.acquire() as conn:
+        unprocessed = await conn.fetchval(
+            "select count(*) from learning_queue where processed = false"
+        )
+        processed = await conn.fetchval(
+            "select count(*) from learning_queue where processed = true"
+        )
+        failed = await conn.fetchval(
+            "select count(*) from learning_queue where processed = false and retry_count >= 2"
+        )
+
+    return {
+        "ok": True,
+        "unprocessed": unprocessed,
+        "processed": processed,
+        "failed_twice_or_more": failed,
+    }
+
+
+@app.post("/v1/learning/process-queue")
+async def learning_process_queue(
+    authorization: Optional[str] = Header(None),
+    batch_size: int = 10,
+):
+    """Xử lý learning_queue — dạy lại nguyên lý cho item chưa xử lý."""
+    _check_auth(authorization)
+
+    if _queue_lock.locked():
+        return {"ok": False, "error": "Queue đang xử lý, thử lại sau"}
+
+    async with _queue_lock:
+        try:
+            res = await _process_learning_queue(batch_size=batch_size)
+        except Exception as e:
+            logger.exception("Process queue lỗi")
+            raise HTTPException(status_code=500, detail=f"Lỗi xử lý queue: {e}")
+
+    return res
 
 
 @app.post("/v1/chat/completions")
