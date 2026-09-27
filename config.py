@@ -14,12 +14,6 @@ CAPTAIN_OPENROUTER_KEY = os.getenv("CAPTAIN_OPENROUTER_KEY", "")
 # ─── SUPABASE (memory chính) ───
 SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL", "")
 
-# ─── CLOUDFLARE R2 (backup) ───
-R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID", "")
-R2_ACCESS_KEY = os.getenv("R2_ACCESS_KEY", "")
-R2_SECRET_KEY = os.getenv("R2_SECRET_KEY", "")
-R2_BUCKET = os.getenv("R2_BUCKET", "thuyen-truong-backup")
-
 # ─── THAM SỐ CHUNG ───
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "120"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
@@ -38,7 +32,3 @@ USER_PROVIDER_BASE_URLS = {
 }
 
 DEFAULT_USER_PROVIDER = "openai"
-
-# ─── BACKUP ───
-BACKUP_INTERVAL_SECONDS = 24 * 60 * 60  # 24 giờ
-BACKUP_KEEP_DAYS = 30                    # giữ 30 ngày backup
