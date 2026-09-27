@@ -13,6 +13,7 @@ from config import (
     CAPTAIN_GROQ_KEY,
     CAPTAIN_GEMINI_KEY,
     CAPTAIN_OPENROUTER_KEY,
+    BACKUP_INTERVAL_SECONDS,
 )
 from auth.captain_keys import is_valid_captain_key
 from auth.rate_limit import is_rate_limited
@@ -29,6 +30,7 @@ from memory.model_registry_db import (
     get_all_active,
     count_by_provider,
 )
+from memory.backup import backup_all, cleanup_old_backups, list_backups
 
 logging.basicConfig(
     level=LOG_LEVEL,
@@ -40,7 +42,9 @@ logger = logging.getLogger("captain")
 AUTO_REFRESH_INTERVAL_SECONDS = 24 * 60 * 60
 
 _last_refresh_ts: float = 0.0
+_last_backup_ts: float = 0.0
 _refresh_lock = asyncio.Lock()
+_backup_lock = asyncio.Lock()
 
 
 @asynccontextmanager
@@ -93,7 +97,6 @@ def _check_auth(authorization: Optional[str]) -> str:
 
 
 async def _do_refresh_models() -> Dict[str, Any]:
-    """Hàm dùng chung để refresh models."""
     provider_keys: Dict[str, str] = {}
     if CAPTAIN_GROQ_KEY:
         provider_keys["groq"] = CAPTAIN_GROQ_KEY
@@ -137,37 +140,58 @@ async def root():
 @app.get("/health")
 async def health():
     """
-    Endpoint health check.
-    Kiêm luôn auto-refresh model mỗi 24h.
+    Health check + auto-refresh + auto-backup.
+    UptimeRobot ping mỗi 5 phút.
     """
-    global _last_refresh_ts
+    global _last_refresh_ts, _last_backup_ts
 
     now = time.time()
-    elapsed = now - _last_refresh_ts
 
-    # Nếu quá 24h → trigger refresh (có lock, không chạy đồng thời)
-    if elapsed >= AUTO_REFRESH_INTERVAL_SECONDS:
-        if _refresh_lock.locked():
-            logger.info("Refresh đang chạy, bỏ qua lần này")
-        else:
+    # ── AUTO REFRESH MODELS ──
+    elapsed_refresh = now - _last_refresh_ts
+    if elapsed_refresh >= AUTO_REFRESH_INTERVAL_SECONDS:
+        if not _refresh_lock.locked():
             async with _refresh_lock:
                 try:
-                    logger.info("Auto-refresh model (đã %ds từ lần cuối)", int(elapsed))
+                    logger.info("Auto-refresh model (đã %ds)", int(elapsed_refresh))
                     res = await _do_refresh_models()
                     if res.get("ok"):
                         _last_refresh_ts = time.time()
                         logger.info("Auto-refresh OK: %s", res.get("active_in_db"))
                     else:
                         logger.warning("Auto-refresh fail: %s", res.get("error"))
-                        _last_refresh_ts = time.time()  # tránh spam
+                        _last_refresh_ts = time.time()
                 except Exception as e:
                     logger.exception("Auto-refresh lỗi: %s", e)
-                    _last_refresh_ts = time.time()  # tránh spam
+                    _last_refresh_ts = time.time()
+
+    # ── AUTO BACKUP ──
+    elapsed_backup = now - _last_backup_ts
+    if elapsed_backup >= BACKUP_INTERVAL_SECONDS:
+        if not _backup_lock.locked():
+            async with _backup_lock:
+                try:
+                    logger.info("Auto-backup (đã %ds)", int(elapsed_backup))
+                    res = await backup_all()
+                    if res.get("ok"):
+                        _last_backup_ts = time.time()
+                        logger.info("Auto-backup OK: %s", res.get("counts"))
+                        try:
+                            await cleanup_old_backups()
+                        except Exception as e:
+                            logger.warning("Cleanup backup lỗi: %s", e)
+                    else:
+                        logger.warning("Auto-backup fail: %s", res.get("error"))
+                        _last_backup_ts = time.time()
+                except Exception as e:
+                    logger.exception("Auto-backup lỗi: %s", e)
+                    _last_backup_ts = time.time()
 
     return {
         "status": "ok",
         "service": "thuyen-truong-ai",
         "last_refresh_seconds_ago": int(time.time() - _last_refresh_ts),
+        "last_backup_seconds_ago": int(time.time() - _last_backup_ts),
     }
 
 
@@ -197,7 +221,6 @@ async def models_active(authorization: Optional[str] = Header(None)):
 
 @app.get("/v1/models/refresh")
 async def models_refresh(authorization: Optional[str] = Header(None)):
-    """Refresh models thủ công."""
     global _last_refresh_ts
     _check_auth(authorization)
 
@@ -239,6 +262,44 @@ async def models_clear_cache(authorization: Optional[str] = Header(None)):
     _check_auth(authorization)
     clear_cache()
     return {"ok": True}
+
+
+# ─── BACKUP ENDPOINTS ───
+
+@app.post("/v1/backup/run")
+async def backup_run(authorization: Optional[str] = Header(None)):
+    """Chạy backup thủ công."""
+    global _last_backup_ts
+    _check_auth(authorization)
+
+    async with _backup_lock:
+        try:
+            res = await backup_all()
+            if res.get("ok"):
+                _last_backup_ts = time.time()
+                try:
+                    await cleanup_old_backups()
+                except Exception as e:
+                    logger.warning("Cleanup backup lỗi: %s", e)
+        except Exception as e:
+            logger.exception("Backup lỗi")
+            raise HTTPException(status_code=500, detail=f"Lỗi backup: {e}")
+
+    return res
+
+
+@app.get("/v1/backup/list")
+async def backup_list(authorization: Optional[str] = Header(None)):
+    """Liệt kê các file backup hiện có."""
+    _check_auth(authorization)
+    return await list_backups()
+
+
+@app.post("/v1/backup/cleanup")
+async def backup_cleanup(authorization: Optional[str] = Header(None)):
+    """Xóa backup cũ hơn 30 ngày."""
+    _check_auth(authorization)
+    return await cleanup_old_backups()
 
 
 @app.post("/v1/chat/completions")
