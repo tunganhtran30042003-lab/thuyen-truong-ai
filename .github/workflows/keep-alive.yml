@@ -1,0 +1,16 @@
+name: Keep Render Alive
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping health
+        run: |
+          curl -X GET "https://thuyen-truong-ai.onrender.com/health" \
+            --max-time 30 \
+            -s -w "\nHTTP Status: %{http_code}\n"

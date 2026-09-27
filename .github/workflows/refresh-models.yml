@@ -1,0 +1,17 @@
+name: Refresh Models Daily
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call refresh endpoint
+        run: |
+          curl -X GET "https://thuyen-truong-ai.onrender.com/v1/models/refresh" \
+            -H "Authorization: Bearer cap_tgxian304203" \
+            --max-time 120 \
+            -s -w "\nHTTP Status: %{http_code}\n"
