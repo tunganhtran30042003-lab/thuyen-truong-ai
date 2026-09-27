@@ -1,4 +1,5 @@
 import logging
+import time
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
@@ -33,6 +34,14 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("captain")
+
+
+# Thời gian tối thiểu giữa 2 lần auto-refresh (24 giờ)
+AUTO_REFRESH_INTERVAL_SECONDS = 24 * 60 * 60
+
+# Biến lưu lần refresh cuối (RAM)
+_last_refresh_ts: float = 0.0
+_refresh_running: bool = False
 
 
 @asynccontextmanager
@@ -84,6 +93,37 @@ def _check_auth(authorization: Optional[str]) -> str:
     return captain_key
 
 
+async def _do_refresh_models() -> Dict[str, Any]:
+    """Hàm dùng chung để refresh models."""
+    provider_keys: Dict[str, str] = {}
+    if CAPTAIN_GROQ_KEY:
+        provider_keys["groq"] = CAPTAIN_GROQ_KEY
+    if CAPTAIN_GEMINI_KEY:
+        provider_keys["gemini"] = CAPTAIN_GEMINI_KEY
+    if CAPTAIN_OPENROUTER_KEY:
+        provider_keys["openrouter"] = CAPTAIN_OPENROUTER_KEY
+
+    if not provider_keys:
+        return {"ok": False, "error": "Chưa cấu hình key riêng"}
+
+    await ensure_table()
+    result = await fetch_all_providers(provider_keys)
+
+    saved_summary: Dict[str, int] = {}
+    for provider, models in result.items():
+        n = await save_models(provider, models)
+        saved_summary[provider] = n
+
+    counts = await count_by_provider()
+
+    return {
+        "ok": True,
+        "fetched": {p: len(m) for p, m in result.items()},
+        "saved": saved_summary,
+        "active_in_db": counts,
+    }
+
+
 @app.get("/")
 async def root():
     return {
@@ -97,7 +137,38 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "thuyen-truong-ai"}
+    """
+    Endpoint health check.
+    Kiêm luôn auto-refresh model mỗi 24h.
+    UptimeRobot ping endpoint này mỗi 5 phút → vừa giữ Render thức,
+    vừa tự động refresh model khi đủ 24h.
+    """
+    global _last_refresh_ts, _refresh_running
+
+    now = time.time()
+    elapsed = now - _last_refresh_ts
+
+    # Nếu quá 24h và chưa có refresh nào đang chạy → trigger
+    if elapsed >= AUTO_REFRESH_INTERVAL_SECONDS and not _refresh_running:
+        _refresh_running = True
+        try:
+            logger.info("Auto-refresh model (đã %ds từ lần cuối)", int(elapsed))
+            res = await _do_refresh_models()
+            if res.get("ok"):
+                _last_refresh_ts = now
+                logger.info("Auto-refresh OK: %s", res.get("active_in_db"))
+            else:
+                logger.warning("Auto-refresh fail: %s", res.get("error"))
+        except Exception as e:
+            logger.exception("Auto-refresh lỗi: %s", e)
+        finally:
+            _refresh_running = False
+
+    return {
+        "status": "ok",
+        "service": "thuyen-truong-ai",
+        "last_refresh_seconds_ago": int(elapsed),
+    }
 
 
 @app.get("/v1/stats")
@@ -119,7 +190,6 @@ async def stats(authorization: Optional[str] = Header(None)):
 
 @app.get("/v1/models/active")
 async def models_active(authorization: Optional[str] = Header(None)):
-    """Lấy danh sách model còn hoạt động từ mỗi provider (gọi API trực tiếp)."""
     _check_auth(authorization)
     data = await list_active_models()
     return data
@@ -127,52 +197,23 @@ async def models_active(authorization: Optional[str] = Header(None)):
 
 @app.get("/v1/models/refresh")
 async def models_refresh(authorization: Optional[str] = Header(None)):
-    """
-    Endpoint tự động fetch models từ tất cả provider có key.
-    Lưu vào Supabase. Gọi endpoint này mỗi ngày 1 lần qua cron.
-    """
+    """Refresh models thủ công. Có thể gọi từ cron hoặc URL."""
+    global _last_refresh_ts
     _check_auth(authorization)
 
-    provider_keys: Dict[str, str] = {}
-    if CAPTAIN_GROQ_KEY:
-        provider_keys["groq"] = CAPTAIN_GROQ_KEY
-    if CAPTAIN_GEMINI_KEY:
-        provider_keys["gemini"] = CAPTAIN_GEMINI_KEY
-    if CAPTAIN_OPENROUTER_KEY:
-        provider_keys["openrouter"] = CAPTAIN_OPENROUTER_KEY
-
-    if not provider_keys:
-        return {
-            "ok": False,
-            "error": "Chưa cấu hình key riêng của thuyền trưởng",
-        }
-
     try:
-        await ensure_table()
-        result = await fetch_all_providers(provider_keys)
-
-        saved_summary: Dict[str, int] = {}
-        for provider, models in result.items():
-            n = await save_models(provider, models)
-            saved_summary[provider] = n
-
-        counts = await count_by_provider()
-
+        res = await _do_refresh_models()
+        if res.get("ok"):
+            _last_refresh_ts = time.time()
     except Exception as e:
         logger.exception("Refresh models lỗi")
         raise HTTPException(status_code=500, detail=f"Lỗi fetch models: {e}")
 
-    return {
-        "ok": True,
-        "fetched": {p: len(m) for p, m in result.items()},
-        "saved": saved_summary,
-        "active_in_db": counts,
-    }
+    return res
 
 
 @app.get("/v1/models/db")
 async def models_db(authorization: Optional[str] = Header(None)):
-    """Đọc danh sách model đã lưu trong DB."""
     _check_auth(authorization)
     try:
         data = await get_all_active()
@@ -188,14 +229,12 @@ async def models_db(authorization: Optional[str] = Header(None)):
 
 @app.get("/v1/models/invalid")
 async def models_invalid(authorization: Optional[str] = Header(None)):
-    """Xem danh sách model đang bị đánh dấu hỏng (từ RAM health cache)."""
     _check_auth(authorization)
     return {"invalid": get_all_invalid()}
 
 
 @app.post("/v1/models/clear_cache")
 async def models_clear_cache(authorization: Optional[str] = Header(None)):
-    """Xóa cache health check — cho phép thử lại tất cả model."""
     _check_auth(authorization)
     clear_cache()
     return {"ok": True}
