@@ -2,12 +2,18 @@
 Lưu danh sách model vào Supabase — cache lại để không gọi API mỗi request.
 Bảng: model_registry
 """
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
 from memory.db import ensure_pool
 
 logger = logging.getLogger("captain.memory.model_registry_db")
+
+
+# Lock đảm bảo chỉ tạo bảng 1 lần
+_ensure_lock = asyncio.Lock()
+_table_ensured = False
 
 
 CREATE_TABLE_SQL = """
@@ -20,17 +26,34 @@ create table if not exists model_registry (
   last_check timestamptz default now(),
   created_at timestamptz default now(),
   unique (provider, model_id)
-);
-create index if not exists idx_model_registry_provider on model_registry (provider, is_active);
+)
+"""
+
+CREATE_INDEX_SQL = """
+create index if not exists idx_model_registry_provider
+on model_registry (provider, is_active)
 """
 
 
 async def ensure_table() -> None:
-    """Tạo bảng nếu chưa có."""
-    pool = await ensure_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(CREATE_TABLE_SQL)
-    logger.info("Đã đảm bảo bảng model_registry tồn tại")
+    """Tạo bảng nếu chưa có. Chỉ chạy 1 lần."""
+    global _table_ensured
+
+    if _table_ensured:
+        return
+
+    async with _ensure_lock:
+        # Double-check sau khi có lock
+        if _table_ensured:
+            return
+
+        pool = await ensure_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(CREATE_TABLE_SQL)
+            await conn.execute(CREATE_INDEX_SQL)
+
+        _table_ensured = True
+        logger.info("Đã đảm bảo bảng model_registry tồn tại")
 
 
 async def save_models(provider: str, models: List[str]) -> int:
@@ -47,7 +70,6 @@ async def save_models(provider: str, models: List[str]) -> int:
     count = 0
 
     async with pool.acquire() as conn:
-        # Upsert từng model
         for m in models:
             await conn.execute(
                 """
@@ -62,7 +84,6 @@ async def save_models(provider: str, models: List[str]) -> int:
             )
             count += 1
 
-        # Đánh dấu inactive cho model không còn trong list mới
         await conn.execute(
             """
             update model_registry

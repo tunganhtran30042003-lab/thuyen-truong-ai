@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -36,12 +37,10 @@ logging.basicConfig(
 logger = logging.getLogger("captain")
 
 
-# Thời gian tối thiểu giữa 2 lần auto-refresh (24 giờ)
 AUTO_REFRESH_INTERVAL_SECONDS = 24 * 60 * 60
 
-# Biến lưu lần refresh cuối (RAM)
 _last_refresh_ts: float = 0.0
-_refresh_running: bool = False
+_refresh_lock = asyncio.Lock()
 
 
 @asynccontextmanager
@@ -140,34 +139,35 @@ async def health():
     """
     Endpoint health check.
     Kiêm luôn auto-refresh model mỗi 24h.
-    UptimeRobot ping endpoint này mỗi 5 phút → vừa giữ Render thức,
-    vừa tự động refresh model khi đủ 24h.
     """
-    global _last_refresh_ts, _refresh_running
+    global _last_refresh_ts
 
     now = time.time()
     elapsed = now - _last_refresh_ts
 
-    # Nếu quá 24h và chưa có refresh nào đang chạy → trigger
-    if elapsed >= AUTO_REFRESH_INTERVAL_SECONDS and not _refresh_running:
-        _refresh_running = True
-        try:
-            logger.info("Auto-refresh model (đã %ds từ lần cuối)", int(elapsed))
-            res = await _do_refresh_models()
-            if res.get("ok"):
-                _last_refresh_ts = now
-                logger.info("Auto-refresh OK: %s", res.get("active_in_db"))
-            else:
-                logger.warning("Auto-refresh fail: %s", res.get("error"))
-        except Exception as e:
-            logger.exception("Auto-refresh lỗi: %s", e)
-        finally:
-            _refresh_running = False
+    # Nếu quá 24h → trigger refresh (có lock, không chạy đồng thời)
+    if elapsed >= AUTO_REFRESH_INTERVAL_SECONDS:
+        if _refresh_lock.locked():
+            logger.info("Refresh đang chạy, bỏ qua lần này")
+        else:
+            async with _refresh_lock:
+                try:
+                    logger.info("Auto-refresh model (đã %ds từ lần cuối)", int(elapsed))
+                    res = await _do_refresh_models()
+                    if res.get("ok"):
+                        _last_refresh_ts = time.time()
+                        logger.info("Auto-refresh OK: %s", res.get("active_in_db"))
+                    else:
+                        logger.warning("Auto-refresh fail: %s", res.get("error"))
+                        _last_refresh_ts = time.time()  # tránh spam
+                except Exception as e:
+                    logger.exception("Auto-refresh lỗi: %s", e)
+                    _last_refresh_ts = time.time()  # tránh spam
 
     return {
         "status": "ok",
         "service": "thuyen-truong-ai",
-        "last_refresh_seconds_ago": int(elapsed),
+        "last_refresh_seconds_ago": int(time.time() - _last_refresh_ts),
     }
 
 
@@ -197,17 +197,18 @@ async def models_active(authorization: Optional[str] = Header(None)):
 
 @app.get("/v1/models/refresh")
 async def models_refresh(authorization: Optional[str] = Header(None)):
-    """Refresh models thủ công. Có thể gọi từ cron hoặc URL."""
+    """Refresh models thủ công."""
     global _last_refresh_ts
     _check_auth(authorization)
 
-    try:
-        res = await _do_refresh_models()
-        if res.get("ok"):
-            _last_refresh_ts = time.time()
-    except Exception as e:
-        logger.exception("Refresh models lỗi")
-        raise HTTPException(status_code=500, detail=f"Lỗi fetch models: {e}")
+    async with _refresh_lock:
+        try:
+            res = await _do_refresh_models()
+            if res.get("ok"):
+                _last_refresh_ts = time.time()
+        except Exception as e:
+            logger.exception("Refresh models lỗi")
+            raise HTTPException(status_code=500, detail=f"Lỗi fetch models: {e}")
 
     return res
 
