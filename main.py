@@ -21,6 +21,12 @@ from brain.health_check import get_all_invalid, clear_cache
 from memory.db import init_pool, close_pool
 from memory.mid_term import count_principles
 from memory.long_term import count_cases
+from memory.model_registry_db import (
+    ensure_table,
+    save_models,
+    get_all_active,
+    count_by_provider,
+)
 
 logging.basicConfig(
     level=LOG_LEVEL,
@@ -32,6 +38,10 @@ logger = logging.getLogger("captain")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_pool()
+    try:
+        await ensure_table()
+    except Exception as e:
+        logger.warning("Không tạo được bảng model_registry: %s", e)
     yield
     await close_pool()
 
@@ -109,6 +119,7 @@ async def stats(authorization: Optional[str] = Header(None)):
 
 @app.get("/v1/models/active")
 async def models_active(authorization: Optional[str] = Header(None)):
+    """Lấy danh sách model còn hoạt động từ mỗi provider (gọi API trực tiếp)."""
     _check_auth(authorization)
     data = await list_active_models()
     return data
@@ -118,7 +129,7 @@ async def models_active(authorization: Optional[str] = Header(None)):
 async def models_refresh(authorization: Optional[str] = Header(None)):
     """
     Endpoint tự động fetch models từ tất cả provider có key.
-    Gọi endpoint này mỗi ngày 1 lần qua cron.
+    Lưu vào Supabase. Gọi endpoint này mỗi ngày 1 lần qua cron.
     """
     _check_auth(authorization)
 
@@ -137,23 +148,47 @@ async def models_refresh(authorization: Optional[str] = Header(None)):
         }
 
     try:
+        await ensure_table()
         result = await fetch_all_providers(provider_keys)
+
+        saved_summary: Dict[str, int] = {}
+        for provider, models in result.items():
+            n = await save_models(provider, models)
+            saved_summary[provider] = n
+
+        counts = await count_by_provider()
+
     except Exception as e:
         logger.exception("Refresh models lỗi")
         raise HTTPException(status_code=500, detail=f"Lỗi fetch models: {e}")
 
-    summary = {provider: len(models) for provider, models in result.items()}
-
     return {
         "ok": True,
-        "summary": summary,
-        "models": result,
+        "fetched": {p: len(m) for p, m in result.items()},
+        "saved": saved_summary,
+        "active_in_db": counts,
+    }
+
+
+@app.get("/v1/models/db")
+async def models_db(authorization: Optional[str] = Header(None)):
+    """Đọc danh sách model đã lưu trong DB."""
+    _check_auth(authorization)
+    try:
+        data = await get_all_active()
+        counts = await count_by_provider()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi đọc DB: {e}")
+    return {
+        "ok": True,
+        "counts": counts,
+        "models": data,
     }
 
 
 @app.get("/v1/models/invalid")
 async def models_invalid(authorization: Optional[str] = Header(None)):
-    """Xem danh sách model đang bị đánh dấu hỏng."""
+    """Xem danh sách model đang bị đánh dấu hỏng (từ RAM health cache)."""
     _check_auth(authorization)
     return {"invalid": get_all_invalid()}
 
